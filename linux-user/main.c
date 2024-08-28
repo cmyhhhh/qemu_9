@@ -125,6 +125,7 @@ static void usage(int exitcode);
 
 static const char *interp_prefix = CONFIG_QEMU_INTERP_PREFIX;
 const char *qemu_uname_release;
+char *qemu_execve_path; // QEMU9 PATCH
 
 #if !defined(TARGET_DEFAULT_STACK_SIZE)
 /* XXX: on x86 MAP_GROWSDOWN only works if ESP <= address + 32, so
@@ -450,6 +451,11 @@ static void handle_arg_jitdump(const char *arg)
     perf_enable_jitdump();
 }
 
+static void handle_arg_execve(const char *arg) // QEMU9 PATCH
+{
+    qemu_execve_path = strdup(arg);
+}
+
 static QemuPluginList plugins = QTAILQ_HEAD_INITIALIZER(plugins);
 
 #ifdef CONFIG_PLUGIN
@@ -469,6 +475,8 @@ struct qemu_argument {
 };
 
 static const struct qemu_argument arg_table[] = {
+    {"execve",     "QEMU_EXECVE",      true,   handle_arg_execve, //  QEMU9 PATCH
+     "path",       "use interpreter at 'path' when a process calls execve()"},
     {"h",          "",                 false, handle_arg_help,
      "",           "print this help"},
     {"help",       "",                 false, handle_arg_help,

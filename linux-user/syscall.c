@@ -6568,6 +6568,10 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         new_thread_info info;
         pthread_attr_t attr;
 
+        if (flags && (CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND)){
+            flags |= CLONE_THREAD_FLAGS;
+        }
+
         if (((flags & CLONE_THREAD_FLAGS) != CLONE_THREAD_FLAGS) ||
             (flags & CLONE_INVALID_THREAD_FLAGS)) {
             return -TARGET_EINVAL;
@@ -8449,6 +8453,177 @@ ssize_t do_guest_readlink(const char *pathname, char *buf, size_t bufsiz)
     return ret;
 }
 
+/* QEMU9 PATCH */
+#define BINPRM_BUF_SIZE 128
+/* qemu_execve() Must return target values and target errnos. */
+static abi_long qemu_execve(char *filename, char *argv[],
+                  char *envp[])
+{
+    char *i_arg = NULL, *i_name = NULL;
+    char **new_argp;
+    int argc, fd, ret, i, offset = 3; // offset是最后预留给execve要执行的程序之前的空间，用于设置qemu参数
+    int tokCount = 0;
+    int trace_count = 0;
+    char *cp;
+    char *token;
+    char *qemu_path_tokens;
+    char *qemu_path;
+    char buf[BINPRM_BUF_SIZE];
+    char tBuf[100];
+
+    fprintf(stderr, "[qemu] doing qemu_execven on filename %s\n", filename);
+    memset(buf, 0, BINPRM_BUF_SIZE);
+
+
+    for (argc = 0; argv[argc] != NULL; argc++) {
+        /* nothing */
+        // fprintf(stderr, "   - arg %s\n", argv[argc]);
+    }
+
+    fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        // fprintf(stderr, "   - ERR1 %d\n", -ENOENT);
+        return -ENOENT;
+    }
+
+    ret = read(fd, buf, BINPRM_BUF_SIZE);
+    if (ret == -1) {
+        close(fd);
+        // fprintf(stderr, "   - ERR2 %d\n", -ENOENT);
+        return -ENOENT;
+    }
+
+    close(fd);
+
+    /* adapted from the kernel
+     * https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/fs/binfmt_script.c
+     */
+    if ((buf[0] == '#') && (buf[1] == '!')) {
+        /*
+         * This section does the #! interpretation.
+         * Sorta complicated, but hopefully it will work.  -TYT
+         */
+        // 以下代码删除#!行内空格以确定执行程序
+        buf[BINPRM_BUF_SIZE - 1] = '\0';
+        cp = strchr(buf, '\n');
+        if (cp == NULL) {
+            cp = buf+BINPRM_BUF_SIZE-1;
+        }
+        *cp = '\0';
+        while (cp > buf) {
+            cp--;
+            if ((*cp == ' ') || (*cp == '\t')) {
+                *cp = '\0';
+            } else {
+                break;
+            }
+        }
+        for (cp = buf+2; (*cp == ' ') || (*cp == '\t'); cp++) {
+            /* nothing */ ;
+        }
+        if (*cp == '\0') {
+            return -ENOEXEC; /* No interpreter name found */
+        }
+        // 找到执行程序名称i_name，继续查找其参数i_arg
+        i_name = cp;
+        i_arg = NULL;
+        for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++) {
+            /* nothing */ ;
+        }
+        while ((*cp == ' ') || (*cp == '\t')) {
+            *cp++ = '\0';
+        }
+        if (*cp) {
+            i_arg = cp;
+        }
+
+        if (i_arg) {
+            offset = 5;
+        } else {
+            offset = 4;
+        }
+    }
+
+    qemu_path_tokens = strdup(qemu_execve_path); // 复制一份-execve后面跟着的参数，是字符串
+    token = strtok(qemu_path_tokens, " "); // 分割字符串，取出一个参数使用
+    qemu_path = strdup(token); // 第一个参数是qemu所在位置
+    token = strtok(NULL, " "); // 取出下一个参数
+    while (token != NULL) { // 统计除qemu外的参数
+        token = strtok(NULL, " ");
+        tokCount += 1;
+    }
+    offset += 2 + tokCount; 
+
+    // execve args
+    // fprintf(stderr, "offset %d argc %d tokCount %d\n", offset, argc, tokCount);
+    fprintf(stderr, "Original args\n");
+    new_argp = alloca((argc + offset + 1) * sizeof(void *));
+    /* Copy the original arguments with offset */
+    for (i = 0; i < argc; i++) {
+        fprintf(stderr, "   - argv %s\n", argv[i]);
+        new_argp[i + offset] = strdup(argv[i]);
+    }
+
+    new_argp[0] = strdup(qemu_path);
+    new_argp[1] = strdup("-0");
+
+    if (i_name) {
+        new_argp[2] = i_name;
+        offset -= 1; // iname is 2nd and 2nd last arg
+        fprintf(stderr, "interpreter name: %s\n", i_name);
+    } else {
+        new_argp[2] = argv[0];
+    }
+
+    // qemu args
+    qemu_path_tokens = strdup(qemu_execve_path);
+    token = strtok(qemu_path_tokens, " ");
+    while (tokCount > 0 && token != NULL) { // 处理-execve后面跟着的参数
+        token = strtok(NULL, " ");
+        if(strstr(token, "trace.log") != NULL) { // 查看trace.logX是否被使用，每个execve都会在之前X基础上+1
+            do {
+            trace_count += 1;
+            memset(tBuf, 0, 100);
+            snprintf(tBuf, 90, "%s%d", token, trace_count);
+            } while( access( tBuf, F_OK ) == 0 );
+            new_argp[offset - 2 - tokCount] = strdup(tBuf); // -2是为了预留-execve “...”两个参数的空间
+        }
+        else {
+            new_argp[offset - 2 - tokCount] = strdup(token);
+        }
+        tokCount -= 1;
+    }
+
+    new_argp[offset - 2] = strdup("-execve");
+    new_argp[offset - 1] = strdup(qemu_execve_path);
+
+    if (i_name) {
+        offset += 1; // iname is 2nd and 2nd last arg
+        new_argp[offset - 1] = i_name;
+
+        if (i_arg) {
+            new_argp[offset - 2] = i_name;
+            new_argp[offset - 1] = i_arg;
+        }
+    }
+
+    new_argp[offset] = filename;
+    new_argp[argc + offset] = NULL;
+
+    // fprintf(stderr, "[qemu] qemu_execve_path %s new_arg\n", qemu_execve_path);
+    for (argc = 0; new_argp[argc] != NULL; argc++) {
+        fprintf(stderr, "   - arg %s\n", new_argp[argc]);
+    }
+
+    // fprintf(stderr, "   - [envp] \n");
+    // for (argc = 0; envp[argc] != NULL; argc++) {
+    //     fprintf(stderr, "   - envp %s\n", envp[argc]);
+    // }
+
+    return get_errno(execve(qemu_path, new_argp, envp));
+}
+/* END QEMU9 PATCH */
+
 static int do_execv(CPUArchState *cpu_env, int dirfd,
                     abi_long pathname, abi_long guest_argp,
                     abi_long guest_envp, int flags, bool is_execveat)
@@ -8534,9 +8709,22 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
     if (is_proc_myself(p, "exe")) {
         exe = exec_path;
     }
-    ret = is_execveat
-        ? safe_execveat(dirfd, exe, argp, envp, flags)
-        : safe_execve(exe, argp, envp);
+
+    // QEMU9 PATCH
+    if (is_execveat) {                                     
+        ret = safe_execveat(dirfd, exe, argp, envp, flags);       
+    } else {
+        if (qemu_execve_path && *qemu_execve_path) {
+            ret = qemu_execve(p, argp, envp);
+        } else {
+            ret = safe_execve(p, argp, envp);
+        }
+    }  
+    // QEMU9 PATCH END
+
+    // ret = is_execveat
+    //     ? safe_execveat(dirfd, exe, argp, envp, flags)
+    //     : safe_execve(exe, argp, envp);
     ret = get_errno(ret);
 
     unlock_user(p, pathname, 0);
