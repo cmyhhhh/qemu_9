@@ -8461,7 +8461,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
 {
     char *i_arg = NULL, *i_name = NULL;
     char **new_argp;
-    int argc, fd, ret, i, offset = 3; // offset是最后预留给execve要执行的程序之前的空间，用于设置qemu参数
+    int argc, fd, ret, i, offset = 5; // offset是最后预留给execve要执行的程序之前的空间，用于设置qemu参数
     int tokCount = 0;
     int trace_count = 0;
     char *cp;
@@ -8538,9 +8538,9 @@ static abi_long qemu_execve(char *filename, char *argv[],
         }
 
         if (i_arg) {
-            offset = 5;
+            offset = offset+2;
         } else {
-            offset = 4;
+            offset = offset+1;
         }
     }
 
@@ -8564,15 +8564,17 @@ static abi_long qemu_execve(char *filename, char *argv[],
         new_argp[i + offset] = strdup(argv[i]);
     }
 
-    new_argp[0] = strdup(qemu_path);
-    new_argp[1] = strdup("-0");
+    new_argp[0] = strdup("chroot_qemu");    
+    new_argp[1] = strdup(".");
+    new_argp[2] = strdup(qemu_path);
+    new_argp[3] = strdup("-0");
 
     if (i_name) {
-        new_argp[2] = i_name;
+        new_argp[4] = i_name;
         offset -= 1; // iname is 2nd and 2nd last arg
         fprintf(stderr, "interpreter name: %s\n", i_name);
     } else {
-        new_argp[2] = argv[0];
+        new_argp[4] = argv[0];
     }
 
     // qemu args
@@ -8610,7 +8612,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
     new_argp[offset] = filename;
     new_argp[argc + offset] = NULL;
 
-    // fprintf(stderr, "[qemu] qemu_execve_path %s new_arg\n", qemu_execve_path);
+    fprintf(stderr, "[qemu] qemu_execve_path %s new_arg\n", qemu_execve_path);
     for (argc = 0; new_argp[argc] != NULL; argc++) {
         fprintf(stderr, "   - arg %s\n", new_argp[argc]);
     }
@@ -8620,7 +8622,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
     //     fprintf(stderr, "   - envp %s\n", envp[argc]);
     // }
 
-    return get_errno(execve(qemu_path, new_argp, envp));
+    return get_errno(execve("chroot", new_argp, envp));
 }
 /* END QEMU9 PATCH */
 
